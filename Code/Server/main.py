@@ -4,6 +4,7 @@ import struct
 import time
 import signal
 import math
+import cv2
 from PyQt5.QtWidgets import QMainWindow, QApplication
 from PyQt5.QtCore import QTimer
 from server_ui import Ui_server_ui
@@ -18,6 +19,7 @@ from car import Car
 from buzzer import Buzzer
 from Thread import stop_thread
 from threading import Thread
+from crosswalk_detector import CrosswalkDetector
 
 class mywindow(QMainWindow, Ui_server_ui):
     def __init__(self):
@@ -44,6 +46,7 @@ class mywindow(QMainWindow, Ui_server_ui):
         self.car = Car()
         self.buzzer = Buzzer()
         self.camera = Camera(stream_size=(400, 300))
+        self.crosswalk_detector = CrosswalkDetector()
         self.queue_cmd = multiprocessing.Queue()
         self.cmd_parse = Message_Parse()
         self.queue_led = multiprocessing.Queue()
@@ -54,11 +57,13 @@ class mywindow(QMainWindow, Ui_server_ui):
         self.car_thread = None
         self.led_process = None
         self.action_process = None
+        self.crosswalk_thread = None
         self.cmd_thread_is_running = False
         self.video_thread_is_running = False
         self.car_thread_is_running = False
         self.led_process_is_running = False
         self.action_process_is_running = False
+        self.crosswalk_thread_is_running = False
         self.car_mode = 1
         self.rotation_flag = False
         self.send_sonic_data_time = time.time()
@@ -81,6 +86,7 @@ class mywindow(QMainWindow, Ui_server_ui):
             self.set_threading_video_send(True)
             self.set_threading_car_task(True)
             self.set_process_led_running(True)
+            self.set_threading_crosswalk_detect(True)
         elif self.label.text() == 'Server On':
             self.label.setText("Server Off")
             self.Button_Server.setText("On")
@@ -89,7 +95,14 @@ class mywindow(QMainWindow, Ui_server_ui):
             self.set_threading_video_send(False)
             self.set_threading_car_task(False)
             self.set_process_led_running(False)
+            self.set_threading_crosswalk_detect(False)
             self.tcp_server = Server()
+
+    def apply_crosswalk_stop(self, duty_values):
+        if self.crosswalk_detector.should_stop():
+            self.car.motor.set_motor_model(0, 0, 0, 0)
+            return [0, 0, 0, 0]
+        return duty_values
 
     def send_sonic_data(self):
         if time.time() - self.send_sonic_data_time > 0.5:
@@ -192,6 +205,7 @@ class mywindow(QMainWindow, Ui_server_ui):
                                 continue
                             scale_factor = 0.8
                             scaled_duty = [int(round(d * scale_factor)) for d in duty]
+                            scaled_duty = self.apply_crosswalk_stop(scaled_duty)
                             self.car.motor.set_motor_model(scaled_duty[0], scaled_duty[1], scaled_duty[2], scaled_duty[3])
                         except:
                             pass
@@ -208,6 +222,7 @@ class mywindow(QMainWindow, Ui_server_ui):
                         BR = LY + LX + RX
                         if duty[0] == None or duty[1]== None or duty[2] == None or duty[3] == None:
                             continue
+                        FL, BL, FR, BR = self.apply_crosswalk_stop([FL, BL, FR, BR])
                         self.car.motor.set_motor_model(FL, BL, FR, BR)
                     elif self.cmd_parse.command_string == self.command.CMD_CAR_ROTATE:
                         try:
@@ -229,6 +244,7 @@ class mywindow(QMainWindow, Ui_server_ui):
                                 BR = LY + LX + RX
                                 if duty[0] == None or duty[1]== None or duty[2] == None:
                                     continue
+                                FL, BL, FR, BR = self.apply_crosswalk_stop([FL, BL, FR, BR])
                                 self.car.motor.set_motor_model(FL, BL, FR, BR)
                             elif self.rotation_flag == False:
                                 try:
@@ -318,9 +334,55 @@ class mywindow(QMainWindow, Ui_server_ui):
                         self.tcp_server.send_data_to_video_client(frame)
                     except:
                         break
-                self.camera.stop_stream()
+                if not self.crosswalk_thread_is_running:
+                    self.camera.stop_stream()
             else:
                 time.sleep(0.1)
+
+    def set_threading_crosswalk_detect(self, state, close_time=0.3):
+        if self.crosswalk_thread is None:
+            buf_state = False
+        else:
+            buf_state = self.crosswalk_thread.is_alive()
+        if state != buf_state:
+            if state:
+                self.crosswalk_thread_is_running = True
+                self.crosswalk_thread = threading.Thread(target=self.threading_crosswalk_detect, daemon=True)
+                self.crosswalk_thread.start()
+            else:
+                self.crosswalk_thread_is_running = False
+                if self.crosswalk_thread is not None:
+                    self.crosswalk_thread.join(close_time)
+                    self.crosswalk_thread = None
+
+    def threading_crosswalk_detect(self):
+        while self.crosswalk_thread_is_running:
+            if not self.camera.streaming:
+                try:
+                    self.camera.start_stream()
+                except Exception as e:
+                    print(f"Crosswalk detector stream error: {e}")
+                    time.sleep(0.5)
+                    continue
+
+            frame = self.camera.get_frame(timeout=0.5)
+            if frame is None:
+                continue
+
+            try:
+                if self.crosswalk_detector.process_jpeg_frame(frame):
+                    print(
+                        "Crosswalk detected: white_pixels={}, stopping for {:.1f}s".format(
+                            self.crosswalk_detector.get_white_pixels(),
+                            self.crosswalk_detector.stop_duration,
+                        )
+                    )
+                if self.crosswalk_detector.should_stop():
+                    self.car.motor.set_motor_model(0, 0, 0, 0)
+            except cv2.error as e:
+                print(f"Crosswalk detector cv2 error: {e}")
+            except Exception as e:
+                print(f"Crosswalk detector error: {e}")
 
     def set_process_led_running(self, state, close_time=0.3):
         if self.led_process is None:
@@ -399,6 +461,7 @@ class mywindow(QMainWindow, Ui_server_ui):
         self.set_threading_video_send(False)
         self.set_threading_car_task(False)
         self.set_process_led_running(False)
+        self.set_threading_crosswalk_detect(False)
         if self.tcp_server:
             self.tcp_server.stop_tcp_servers()
             self.tcp_server = None
@@ -409,6 +472,8 @@ class mywindow(QMainWindow, Ui_server_ui):
             self.video_thread.join(0.1)
         if self.car_thread and self.car_thread.is_alive():
             self.car_thread.join(0.1)
+        if self.crosswalk_thread and self.crosswalk_thread.is_alive():
+            self.crosswalk_thread.join(0.1)
         if self.led_process and self.led_process.is_alive():
             self.led_process.terminate()
             self.led_process.join(0.1)
@@ -422,7 +487,7 @@ class mywindow(QMainWindow, Ui_server_ui):
     def check_signals(self):
         if self.app.hasPendingEvents():
             self.app.processEvents()
-        if not self.ui_button_state and not self.cmd_thread_is_running and not self.video_thread_is_running and not self.led_process_is_running and not self.action_process_is_running:
+        if not self.ui_button_state and not self.cmd_thread_is_running and not self.video_thread_is_running and not self.led_process_is_running and not self.action_process_is_running and not self.crosswalk_thread_is_running:
             self.app.quit()
 
 if __name__ == '__main__':
