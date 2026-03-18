@@ -1,4 +1,6 @@
 import time
+import os
+import re
 from picamera2 import Picamera2, Preview
 from picamera2.encoders import H264Encoder, JpegEncoder
 from picamera2.outputs import FileOutput
@@ -33,10 +35,11 @@ class Camera:
         self.streaming_output = StreamingOutput()  # Initialize the streaming output object
         self.streaming = False  # Initialize the streaming flag
 
-    def start_image(self) -> None:
+    def start_image(self, use_preview: bool = True) -> None:
         """Start the camera preview and capture."""
-        self.camera.start_preview(Preview.QTGL)  # Start the camera preview using the QTGL backend
-        self.camera.start()                      # Start the camera
+        if use_preview:
+            self.camera.start_preview(Preview.QTGL)  # Start the camera preview using the QTGL backend
+        self.camera.start()                          # Start the camera
 
     def save_image(self, filename: str) -> dict:
         """Capture and save an image to the specified file."""
@@ -72,12 +75,10 @@ class Camera:
             except Exception as e:
                 print(f"Error stopping stream: {e}")       # Print error message if stopping fails
 
-    def get_frame(self, timeout: float = None) -> bytes:
+    def get_frame(self) -> bytes:
         """Get the current frame from the streaming output."""
         with self.streaming_output.condition:
-            has_frame = self.streaming_output.condition.wait(timeout=timeout)
-            if not has_frame:
-                return None
+            self.streaming_output.condition.wait()         # Wait for a new frame to be available
             return self.streaming_output.frame             # Return the current frame
 
     def save_video(self, filename: str, duration: int = 10) -> None:
@@ -93,30 +94,57 @@ class Camera:
         self.camera.close()                                # Close the camera
 
 if __name__ == '__main__':
-    print('Program is starting ... ')                    # Print a message indicating the start of the program
-    camera = Camera()                                    # Create a Camera instance
+    print('Program is starting ... ')
+    camera = Camera()
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    image_dir = os.path.join(script_dir, "image")
+    os.makedirs(image_dir, exist_ok=True)
 
-    print("View image...")
-    camera.start_image()                                 # Start the camera preview
-    time.sleep(10)                                       # Wait for 10 seconds
-    
-    print("Capture image...")
-    camera.save_image(filename="image.jpg")              # Capture and save an image
-    time.sleep(1)                                        # Wait for 1 second
+    def normalize_name(name: str) -> str:
+        cleaned = re.sub(r'[^A-Za-z0-9_-]', '_', name.strip())
+        return cleaned if cleaned else "image"
 
-    '''
-    print("Stream video...")
-    camera.start_stream()                                # Start the video stream
-    time.sleep(3)                                        # Stream for 3 seconds
-    
-    print("Stop video...")
-    camera.stop_stream()                                 # Stop the video stream
-    time.sleep(1)                                        # Wait for 1 second
+    def build_output_path(base_name: str) -> str:
+        first_path = os.path.join(image_dir, f"{base_name}.jpg")
+        if not os.path.exists(first_path):
+            return first_path
+        index = 1
+        while True:
+            candidate = os.path.join(image_dir, f"{base_name}_{index}.jpg")
+            if not os.path.exists(candidate):
+                return candidate
+            index += 1
 
-    print("Save video...")
-    camera.save_video("video.h264", duration=3)          # Save a video for 3 seconds
-    time.sleep(1)                                        # Wait for 1 second
-    
-    print("Close camera...")
-    camera.close()                                       # Close the camera
-    '''
+    try:
+        print("View image...")
+        has_display = bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
+        if not has_display:
+            print("No GUI display detected. Running in headless mode (no preview window).")
+        camera.start_image(use_preview=has_display)
+        print("Command: c <name> (capture), q (quit)")
+
+        while True:
+            user_input = input(">> ").strip()
+            if not user_input:
+                continue
+            if user_input.lower() == "q":
+                print("Exit requested.")
+                break
+            if user_input.lower().startswith("c"):
+                parts = user_input.split(maxsplit=1)
+                if len(parts) == 2 and parts[1].strip():
+                    raw_name = parts[1].strip()
+                else:
+                    raw_name = input("Image name: ").strip()
+                base_name = normalize_name(raw_name)
+                output_path = build_output_path(base_name)
+                metadata = camera.save_image(filename=output_path)
+                if metadata is not None:
+                    print(f"Saved: {output_path}")
+                continue
+            print("Unknown command. Use: c <name> or q")
+    except KeyboardInterrupt:
+        print("\nInterrupted by user.")
+    finally:
+        print("Close camera...")
+        camera.close()
