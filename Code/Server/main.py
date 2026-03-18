@@ -370,6 +370,7 @@ class mywindow(QMainWindow, Ui_server_ui):
                 continue
 
             try:
+                print(f"Crosswalk white_pixels={self.crosswalk_detector.get_white_pixels()}")
                 if self.crosswalk_detector.process_jpeg_frame(frame):
                     print(
                         "Crosswalk detected: white_pixels={}, stopping for {:.1f}s".format(
