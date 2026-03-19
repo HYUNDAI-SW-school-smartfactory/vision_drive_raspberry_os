@@ -15,6 +15,7 @@ class AutoRaceLaneDriveWithCrosswalk:
             stop_duration=args.crosswalk_stop_duration,
         )
         self.crosswalk_active = False
+        self.last_crosswalk_log_time = 0.0
 
     def close(self):
         self.driver.close()
@@ -45,7 +46,18 @@ class AutoRaceLaneDriveWithCrosswalk:
 
                 frame_bgr = cv2.resize(frame_bgr, (self.driver.width, self.driver.height))
 
-                if self.detect_crosswalk(frame_bgr):
+                detected_now = self.detect_crosswalk(frame_bgr)
+                now = time.time()
+                if now - self.last_crosswalk_log_time >= 0.2:
+                    print(
+                        "[CROSSWALK] green_pixels={} threshold={}".format(
+                            self.crosswalk_detector.get_green_pixels(),
+                            self.crosswalk_detector.green_threshold,
+                        )
+                    )
+                    self.last_crosswalk_log_time = now
+
+                if detected_now:
                     print(
                         "[CROSSWALK] detected: green_pixels={}, stopping for {:.1f}s".format(
                             self.crosswalk_detector.get_green_pixels(),
