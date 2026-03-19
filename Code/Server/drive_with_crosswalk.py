@@ -1,10 +1,11 @@
-import time
+﻿import time
 
 import cv2
 import numpy as np
 
 from crosswalk_detector import CrosswalkDetector
 from drive import AutoRaceLaneDrive, build_parser
+from vision_server_client import VisionServerClient
 
 
 class AutoRaceLaneDriveWithCrosswalk:
@@ -16,15 +17,92 @@ class AutoRaceLaneDriveWithCrosswalk:
         )
         self.crosswalk_active = False
         self.last_crosswalk_log_time = 0.0
+        self.last_command_poll_time = 0.0
+        self.last_server_error_log_time = 0.0
+        self.stop_upload_attempted = False
+        self.current_route: list[str] = []
+        self.server_client = None
+
+        if not args.disable_server_comm:
+            self.server_client = VisionServerClient(
+                host=args.server_host,
+                port=args.server_port,
+                timeout_sec=args.server_timeout_sec,
+            )
+            self.bootstrap_server_connection()
+        else:
+            print("[SERVER] communication disabled")
 
     def close(self):
         self.driver.close()
+
+    def bootstrap_server_connection(self):
+        if self.server_client is None:
+            return
+        try:
+            health = self.server_client.check_health()
+            print(f"[SERVER] health={health}")
+        except Exception as exc:
+            self.log_server_error("health check", exc)
+        self.poll_route(force=True)
+
+    def log_server_error(self, context: str, exc: Exception):
+        now = time.time()
+        if now - self.last_server_error_log_time >= 2.0:
+            print(f"[SERVER] {context} failed: {exc}")
+            self.last_server_error_log_time = now
+
+    def poll_route(self, force: bool = False):
+        if self.server_client is None:
+            return
+
+        now = time.time()
+        if not force and now - self.last_command_poll_time < self.driver.args.command_poll_interval:
+            return
+        self.last_command_poll_time = now
+
+        try:
+            route = self.server_client.get_command()
+        except Exception as exc:
+            self.log_server_error("route poll", exc)
+            return
+
+        if route != self.current_route:
+            self.current_route = route
+            print(f"[SERVER] route updated: {self.current_route}")
 
     def detect_crosswalk(self, frame_bgr: np.ndarray) -> bool:
         ok, encoded = cv2.imencode(".jpg", frame_bgr)
         if not ok:
             return False
         return self.crosswalk_detector.process_jpeg_frame(encoded.tobytes())
+
+    def upload_stop_frame(self, frame_bgr: np.ndarray):
+        if self.server_client is None or self.driver.args.disable_analyze_upload:
+            return
+        if self.stop_upload_attempted:
+            return
+
+        self.stop_upload_attempted = True
+        ok, encoded = cv2.imencode(".jpg", frame_bgr)
+        if not ok:
+            print("[SERVER] analyze upload skipped: jpeg encode failed")
+            return
+
+        filename = f"crosswalk_stop_{int(time.time())}.jpg"
+        try:
+            response = self.server_client.analyze_image_bytes(
+                encoded.tobytes(),
+                filename=filename,
+            )
+            print(
+                "[SERVER] analyze uploaded: filename={} size_bytes={}".format(
+                    response.get("filename", filename),
+                    response.get("size_bytes", len(encoded)),
+                )
+            )
+        except Exception as exc:
+            self.log_server_error("analyze upload", exc)
 
     def drive(self):
         print("Auto-Race lane drive with red crosswalk stop started.")
@@ -45,6 +123,7 @@ class AutoRaceLaneDriveWithCrosswalk:
                     frame_bgr = frame_raw.copy()
 
                 frame_bgr = cv2.resize(frame_bgr, (self.driver.width, self.driver.height))
+                self.poll_route()
 
                 detected_now = self.detect_crosswalk(frame_bgr)
                 now = time.time()
@@ -71,6 +150,8 @@ class AutoRaceLaneDriveWithCrosswalk:
                         remaining = max(0.0, self.crosswalk_detector.stop_until - time.time())
                         print(f"[CROSSWALK] stop active, remaining={remaining:.1f}s")
                         self.crosswalk_active = True
+                        self.stop_upload_attempted = False
+                        self.upload_stop_frame(frame_bgr)
                     self.driver.pid.reset()
                     self.driver.stop()
                     if self.driver.show_window:
@@ -85,6 +166,7 @@ class AutoRaceLaneDriveWithCrosswalk:
 
                 if self.crosswalk_active:
                     self.crosswalk_active = False
+                    self.stop_upload_attempted = False
                     print("[CROSSWALK] stop released, resume lane drive")
 
                 result = self.driver.process_frame(frame_bgr)
@@ -148,6 +230,12 @@ def main():
     parser.description = "Auto-Race style lane tracking with red crosswalk stop"
     parser.add_argument("--red-cross-walk-threshold", type=int, default=8000)
     parser.add_argument("--crosswalk-stop-duration", type=float, default=5.0)
+    parser.add_argument("--server-host", default="127.0.0.1")
+    parser.add_argument("--server-port", type=int, default=8000)
+    parser.add_argument("--server-timeout-sec", type=float, default=2.0)
+    parser.add_argument("--command-poll-interval", type=float, default=1.0)
+    parser.add_argument("--disable-server-comm", action="store_true")
+    parser.add_argument("--disable-analyze-upload", action="store_true")
     args = parser.parse_args()
     args.frame_order = "rgb"
     driver = AutoRaceLaneDriveWithCrosswalk(args)
