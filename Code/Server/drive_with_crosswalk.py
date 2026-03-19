@@ -11,7 +11,7 @@ class AutoRaceLaneDriveWithCrosswalk:
     def __init__(self, args):
         self.driver = AutoRaceLaneDrive(args)
         self.crosswalk_detector = CrosswalkDetector(
-            green_threshold=args.green_threshold,
+            red_cross_walk_threshold=args.red_cross_walk_threshold,
             stop_duration=args.crosswalk_stop_duration,
         )
         self.crosswalk_active = False
@@ -27,7 +27,7 @@ class AutoRaceLaneDriveWithCrosswalk:
         return self.crosswalk_detector.process_jpeg_frame(encoded.tobytes())
 
     def drive(self):
-        print("Auto-Race lane drive with green crosswalk stop started.")
+        print("Auto-Race lane drive with red crosswalk stop started.")
         if self.driver.show_window:
             print("Press 'q' to quit.")
         else:
@@ -50,17 +50,18 @@ class AutoRaceLaneDriveWithCrosswalk:
                 now = time.time()
                 if now - self.last_crosswalk_log_time >= 0.2:
                     print(
-                        "[CROSSWALK] green_pixels={} threshold={}".format(
-                            self.crosswalk_detector.get_green_pixels(),
-                            self.crosswalk_detector.green_threshold,
+                        "[CROSSWALK] raw_pixels={} warped_pixels={} threshold={}".format(
+                            self.crosswalk_detector.get_red_cross_walk_raw_pixels(),
+                            self.crosswalk_detector.get_red_cross_walk_pixels(),
+                            self.crosswalk_detector.red_cross_walk_threshold,
                         )
                     )
                     self.last_crosswalk_log_time = now
 
                 if detected_now:
                     print(
-                        "[CROSSWALK] detected: green_pixels={}, stopping for {:.1f}s".format(
-                            self.crosswalk_detector.get_green_pixels(),
+                        "[CROSSWALK] detected: red_cross_walk_pixels={}, stopping for {:.1f}s".format(
+                            self.crosswalk_detector.get_red_cross_walk_pixels(),
                             self.crosswalk_detector.stop_duration,
                         )
                     )
@@ -144,10 +145,11 @@ class AutoRaceLaneDriveWithCrosswalk:
 
 def main():
     parser = build_parser()
-    parser.description = "Auto-Race style lane tracking with green crosswalk stop"
-    parser.add_argument("--green-threshold", type=int, default=8000)
+    parser.description = "Auto-Race style lane tracking with red crosswalk stop"
+    parser.add_argument("--red-cross-walk-threshold", type=int, default=8000)
     parser.add_argument("--crosswalk-stop-duration", type=float, default=5.0)
     args = parser.parse_args()
+    args.frame_order = "rgb"
     driver = AutoRaceLaneDriveWithCrosswalk(args)
     driver.drive()
 
