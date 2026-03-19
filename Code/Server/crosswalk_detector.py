@@ -5,18 +5,18 @@ import numpy as np
 
 
 class CrosswalkDetector:
-    def __init__(self, black_threshold=15000, stop_duration=6.3):
-        self.black_threshold = black_threshold
+    def __init__(self, green_threshold=8000, stop_duration=6.3):
+        self.green_threshold = green_threshold
         self.stop_duration = stop_duration
 
-        # Start with a broad black-tape HSV range and tune from runtime logs.
-        self.lower_black = np.array([0, 0, 0], dtype=np.uint8)
-        self.upper_black = np.array([180, 255, 60], dtype=np.uint8)
+        # Start with a broad green HSV range and tune from runtime logs.
+        self.lower_green = np.array([35, 60, 60], dtype=np.uint8)
+        self.upper_green = np.array([95, 255, 255], dtype=np.uint8)
 
         self.frame_size = (640, 480)
         self._perspective_matrix = self._build_perspective_matrix(*self.frame_size)
 
-        self.black_pixels = 0
+        self.green_pixels = 0
         self.stop_until = 0.0
         self.triggered_once = False
 
@@ -43,14 +43,14 @@ class CrosswalkDetector:
 
         frame_resized = cv2.resize(frame, self.frame_size)
         img_hsv = cv2.cvtColor(frame_resized, cv2.COLOR_BGR2HSV)
-        mask_black = cv2.inRange(img_hsv, self.lower_black, self.upper_black)
-        warped_img_black = cv2.warpPerspective(mask_black, self._perspective_matrix, self.frame_size)
+        mask_green = cv2.inRange(img_hsv, self.lower_green, self.upper_green)
+        warped_img_green = cv2.warpPerspective(mask_green, self._perspective_matrix, self.frame_size)
 
         roi_start_y = int(self.frame_size[1] * 0.3)
-        warped_black_roi = warped_img_black[roi_start_y:self.frame_size[1], :]
-        self.black_pixels = int(np.count_nonzero(warped_black_roi))
+        warped_green_roi = warped_img_green[roi_start_y:self.frame_size[1], :]
+        self.green_pixels = int(np.count_nonzero(warped_green_roi))
 
-        if not self.triggered_once and self.black_pixels > self.black_threshold:
+        if not self.triggered_once and self.green_pixels > self.green_threshold:
             self.triggered_once = True
             self.stop_until = time.time() + self.stop_duration
             return True
@@ -59,5 +59,8 @@ class CrosswalkDetector:
     def should_stop(self):
         return time.time() < self.stop_until
 
+    def get_green_pixels(self):
+        return self.green_pixels
+
     def get_black_pixels(self):
-        return self.black_pixels
+        return self.green_pixels
