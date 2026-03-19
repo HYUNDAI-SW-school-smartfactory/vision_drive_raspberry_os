@@ -51,6 +51,7 @@ class mywindow(QMainWindow, Ui_server_ui):
 
         self.queue_cmd = []
         self.cmd_parse = Message_Parse()
+        self.crosswalk_active = False
 
         self.cmd_thread = None
         self.video_thread = None
@@ -180,16 +181,23 @@ class mywindow(QMainWindow, Ui_server_ui):
         try:
             if self.crosswalk_detector.process_jpeg_frame(frame):
                 print(
-                    "Crosswalk detected: green_pixels={}, stopping for {:.1f}s".format(
+                    "[CROSSWALK] detected: green_pixels={}, stopping for {:.1f}s".format(
                         self.crosswalk_detector.get_green_pixels(),
                         self.crosswalk_detector.stop_duration,
                     )
                 )
 
             if self.crosswalk_detector.should_stop():
+                if not self.crosswalk_active:
+                    remaining = max(0.0, self.crosswalk_detector.stop_until - time.time())
+                    print(f"[CROSSWALK] stop active, remaining={remaining:.1f}s")
+                    self.crosswalk_active = True
                 self.lane_driver.pid.reset()
                 self.car.motor.set_motor_model(0, 0, 0, 0)
                 return
+            elif self.crosswalk_active:
+                self.crosswalk_active = False
+                print("[CROSSWALK] stop released, resume lane drive")
 
             frame_array = np.frombuffer(frame, dtype=np.uint8)
             frame_bgr = cv2.imdecode(frame_array, cv2.IMREAD_COLOR)
