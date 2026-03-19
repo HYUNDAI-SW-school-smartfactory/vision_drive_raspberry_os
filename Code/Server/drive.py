@@ -410,14 +410,14 @@ def build_parser():
 
     # Perspective warp source points.
     # Tuned defaults for 640x480 front camera to include both black lanes.
-    p.add_argument("--warp-src-x1", type=float, default=80)
-    p.add_argument("--warp-src-y1", type=float, default=470)
-    p.add_argument("--warp-src-x2", type=float, default=250)
-    p.add_argument("--warp-src-y2", type=float, default=250)
-    p.add_argument("--warp-src-x3", type=float, default=445)
-    p.add_argument("--warp-src-y3", type=float, default=250)
-    p.add_argument("--warp-src-x4", type=float, default=595)
-    p.add_argument("--warp-src-y4", type=float, default=470)
+    p.add_argument("--warp-src-x1", type=float, default=0)
+    p.add_argument("--warp-src-y1", type=float, default=479)
+    p.add_argument("--warp-src-x2", type=float, default=150)
+    p.add_argument("--warp-src-y2", type=float, default=280)
+    p.add_argument("--warp-src-x3", type=float, default=520)
+    p.add_argument("--warp-src-y3", type=float, default=280)
+    p.add_argument("--warp-src-x4", type=float, default=639)
+    p.add_argument("--warp-src-y4", type=float, default=479)
     p.add_argument("--min-warp-pixels", type=int, default=300)
 
     # Sliding window parameters.
