@@ -143,14 +143,20 @@ class AutoRaceLaneDrive:
         h, w = binary_warped.shape
         histogram = np.sum(binary_warped[h // 2 :, :], axis=0)
         midpoint = w // 2
+        lane_side = self.args.lane_side.upper()
 
-        leftx_base = int(np.argmax(histogram[:midpoint]))
-        rightx_base = int(np.argmax(histogram[midpoint:]) + midpoint)
+        leftx_base = None
+        rightx_base = None
 
-        if histogram[leftx_base] < self.args.hist_min_peak:
-            leftx_base = None
-        if histogram[rightx_base] < self.args.hist_min_peak:
-            rightx_base = None
+        if lane_side in ("BOTH", "LEFT"):
+            leftx_base = int(np.argmax(histogram[:midpoint]))
+            if histogram[leftx_base] < self.args.hist_min_peak:
+                leftx_base = None
+
+        if lane_side in ("BOTH", "RIGHT"):
+            rightx_base = int(np.argmax(histogram[midpoint:]) + midpoint)
+            if histogram[rightx_base] < self.args.hist_min_peak:
+                rightx_base = None
 
         nwindows = self.args.nwindows
         window_h = h // nwindows
@@ -219,16 +225,16 @@ class AutoRaceLaneDrive:
         left_fit = None
         right_fit = None
 
-        if left_detected:
+        if lane_side in ("BOTH", "LEFT") and left_detected:
             left_mean = int(np.mean(nz_x[left_inds]))
             if len(left_inds) >= self.args.min_fit_pixels:
                 left_fit = np.polyfit(nz_y[left_inds], nz_x[left_inds], 2)
-        if right_detected:
+        if lane_side in ("BOTH", "RIGHT") and right_detected:
             right_mean = int(np.mean(nz_x[right_inds]))
             if len(right_inds) >= self.args.min_fit_pixels:
                 right_fit = np.polyfit(nz_y[right_inds], nz_x[right_inds], 2)
 
-        if left_detected and right_detected:
+        if lane_side == "BOTH" and left_detected and right_detected:
             lane_width = max(80, right_mean - left_mean)
             self.last_lane_width = lane_width
             x_location = (left_mean + right_mean) // 2
@@ -246,6 +252,22 @@ class AutoRaceLaneDrive:
                     (1.0 - self.args.lookahead_weight) * center_near
                     + self.args.lookahead_weight * center_far
                 )
+            else:
+                target_x = x_location
+        elif lane_side == "LEFT" and left_detected:
+            offset = int(max(self.args.single_lane_offset, self.last_lane_width * 0.5))
+            x_location = int(left_mean + offset)
+            if left_fit is not None:
+                y_far = int(h * self.args.lookahead_far_ratio)
+                target_x = int(np.polyval(left_fit, y_far) + offset)
+            else:
+                target_x = x_location
+        elif lane_side == "RIGHT" and right_detected:
+            offset = int(max(self.args.single_lane_offset, self.last_lane_width * 0.5))
+            x_location = int(right_mean - offset)
+            if right_fit is not None:
+                y_far = int(h * self.args.lookahead_far_ratio)
+                target_x = int(np.polyval(right_fit, y_far) - offset)
             else:
                 target_x = x_location
         elif left_detected:
@@ -427,6 +449,7 @@ def build_parser():
     p.add_argument("--hist-min-peak", type=int, default=50)
     p.add_argument("--min-lane-pixels", type=int, default=80)
     p.add_argument("--min-fit-pixels", type=int, default=120)
+    p.add_argument("--lane-side", choices=["both", "left", "right"], default="right")
     p.add_argument("--single-lane-offset", type=int, default=100)
     p.add_argument("--x-smooth-alpha", type=float, default=0.50)
     p.add_argument("--target-smooth-alpha", type=float, default=0.35)
