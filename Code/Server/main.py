@@ -11,6 +11,7 @@ from server_ui import Ui_server_ui
 from server import Server
 import threading
 import multiprocessing
+import numpy as np
 from message import Message_Parse
 from command import Command
 from led import Led
@@ -20,6 +21,7 @@ from buzzer import Buzzer
 from Thread import stop_thread
 from threading import Thread
 from crosswalk_detector import CrosswalkDetector
+from drive import AutoRaceLaneDrive, build_parser
 
 class mywindow(QMainWindow, Ui_server_ui):
     def __init__(self):
@@ -45,8 +47,12 @@ class mywindow(QMainWindow, Ui_server_ui):
         self.led = Led()
         self.car = Car()
         self.buzzer = Buzzer()
-        self.camera = Camera(stream_size=(400, 300))
-        self.crosswalk_detector = CrosswalkDetector()
+        self.camera = Camera(stream_size=(640, 480))
+        self.crosswalk_detector = CrosswalkDetector(stop_duration=5.0)
+        lane_args = build_parser().parse_args([])
+        lane_args.headless = True
+        lane_args.lane_side = "right"
+        self.lane_driver = AutoRaceLaneDrive(lane_args, motor=self.car.motor, init_camera=False)
         self.queue_cmd = multiprocessing.Queue()
         self.cmd_parse = Message_Parse()
         self.queue_led = multiprocessing.Queue()
@@ -64,7 +70,7 @@ class mywindow(QMainWindow, Ui_server_ui):
         self.led_process_is_running = False
         self.action_process_is_running = False
         self.crosswalk_thread_is_running = False
-        self.car_mode = 1
+        self.car_mode = 5
         self.rotation_flag = False
         self.send_sonic_data_time = time.time()
         self.send_light_data_time = time.time()
@@ -73,6 +79,7 @@ class mywindow(QMainWindow, Ui_server_ui):
 
     def stop_car(self):
         self.led.colorBlink(0)
+        self.lane_driver.stop()
         self.camera.stop_stream()
         self.camera.close()
         self.car.close()
@@ -86,7 +93,6 @@ class mywindow(QMainWindow, Ui_server_ui):
             self.set_threading_video_send(True)
             self.set_threading_car_task(True)
             self.set_process_led_running(True)
-            self.set_threading_crosswalk_detect(True)
         elif self.label.text() == 'Server On':
             self.label.setText("Server Off")
             self.Button_Server.setText("On")
@@ -95,7 +101,6 @@ class mywindow(QMainWindow, Ui_server_ui):
             self.set_threading_video_send(False)
             self.set_threading_car_task(False)
             self.set_process_led_running(False)
-            self.set_threading_crosswalk_detect(False)
             self.tcp_server = Server()
 
     def apply_crosswalk_stop(self, duty_values):
@@ -270,6 +275,9 @@ class mywindow(QMainWindow, Ui_server_ui):
                         elif self.cmd_parse.int_parameter[0] == 3:
                             self.car_mode = 4
                             print("Car Mode: Ultrasonic Car")
+                        elif self.cmd_parse.int_parameter[0] == 4:
+                            self.car_mode = 5
+                            print("Car Mode: Lane Drive Car")
                     
             if self.queue_cmd.empty():
                 time.sleep(0.001)
@@ -302,7 +310,52 @@ class mywindow(QMainWindow, Ui_server_ui):
             elif self.car_mode == 4:
                 self.car.mode_ultrasonic()
                 self.send_sonic_data()
+            elif self.car_mode == 5:
+                self.mode_lane_drive()
             time.sleep(0.01)
+
+    def mode_lane_drive(self):
+        if not self.camera.streaming:
+            try:
+                self.camera.start_stream()
+            except Exception as e:
+                print(f"Lane drive stream error: {e}")
+                time.sleep(0.1)
+                return
+
+        frame = self.camera.get_frame()
+        if frame is None:
+            return
+
+        try:
+            if self.crosswalk_detector.process_jpeg_frame(frame):
+                print(
+                    "Crosswalk detected: green_pixels={}, stopping for {:.1f}s".format(
+                        self.crosswalk_detector.get_green_pixels(),
+                        self.crosswalk_detector.stop_duration,
+                    )
+                )
+
+            if self.crosswalk_detector.should_stop():
+                self.lane_driver.pid.reset()
+                self.car.motor.set_motor_model(0, 0, 0, 0)
+                return
+
+            frame_array = np.frombuffer(frame, dtype=np.uint8)
+            frame_bgr = cv2.imdecode(frame_array, cv2.IMREAD_COLOR)
+            if frame_bgr is None:
+                return
+
+            result = self.lane_driver.process_frame(frame_bgr)
+            if result["stop_required"]:
+                self.car.motor.set_motor_model(0, 0, 0, 0)
+            elif result["lane_detected"]:
+                self.lane_driver.apply_drive_command(result["cmd_left"], result["cmd_right"])
+            print(f"[LANE] {result['msg']}")
+        except cv2.error as e:
+            print(f"Lane drive cv2 error: {e}")
+        except Exception as e:
+            print(f"Lane drive error: {e}")
 
 
     def set_threading_video_send(self, state, close_time=0.3):
@@ -462,7 +515,6 @@ class mywindow(QMainWindow, Ui_server_ui):
         self.set_threading_video_send(False)
         self.set_threading_car_task(False)
         self.set_process_led_running(False)
-        self.set_threading_crosswalk_detect(False)
         if self.tcp_server:
             self.tcp_server.stop_tcp_servers()
             self.tcp_server = None
@@ -473,8 +525,6 @@ class mywindow(QMainWindow, Ui_server_ui):
             self.video_thread.join(0.1)
         if self.car_thread and self.car_thread.is_alive():
             self.car_thread.join(0.1)
-        if self.crosswalk_thread and self.crosswalk_thread.is_alive():
-            self.crosswalk_thread.join(0.1)
         if self.led_process and self.led_process.is_alive():
             self.led_process.terminate()
             self.led_process.join(0.1)
@@ -488,7 +538,7 @@ class mywindow(QMainWindow, Ui_server_ui):
     def check_signals(self):
         if self.app.hasPendingEvents():
             self.app.processEvents()
-        if not self.ui_button_state and not self.cmd_thread_is_running and not self.video_thread_is_running and not self.led_process_is_running and not self.action_process_is_running and not self.crosswalk_thread_is_running:
+        if not self.ui_button_state and not self.cmd_thread_is_running and not self.video_thread_is_running and not self.led_process_is_running and not self.action_process_is_running:
             self.app.quit()
 
 if __name__ == '__main__':

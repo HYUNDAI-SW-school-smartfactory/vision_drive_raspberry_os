@@ -36,19 +36,23 @@ class PID:
 
 
 class AutoRaceLaneDrive:
-    def __init__(self, args):
+    def __init__(self, args, motor=None, init_camera=True):
         self.args = args
-        self.motor = Ordinary_Car()
+        self.motor = motor if motor is not None else Ordinary_Car()
+        self.owns_motor = motor is None
         self.pid = PID(args.kp, args.ki, args.kd)
+        self.camera = None
+        self.owns_camera = init_camera
 
-        self.camera = Picamera2()
-        transform = Transform(hflip=1 if args.hflip else 0, vflip=1 if args.vflip else 0)
-        config = self.camera.create_preview_configuration(
-            main={"size": (args.width, args.height), "format": "RGB888"},
-            transform=transform,
-        )
-        self.camera.configure(config)
-        self.camera.start()
+        if init_camera:
+            self.camera = Picamera2()
+            transform = Transform(hflip=1 if args.hflip else 0, vflip=1 if args.vflip else 0)
+            config = self.camera.create_preview_configuration(
+                main={"size": (args.width, args.height), "format": "RGB888"},
+                transform=transform,
+            )
+            self.camera.configure(config)
+            self.camera.start()
 
         self.width = args.width
         self.height = args.height
@@ -80,15 +84,18 @@ class AutoRaceLaneDrive:
         print(f"[WARP SRC] {self.warp_src.tolist()}")
 
     def stop(self):
-        self.motor.set_motor_model(0, 0, 0, 0)
+        if self.motor is not None:
+            self.motor.set_motor_model(0, 0, 0, 0)
 
     def close(self):
         try:
             self.stop()
         finally:
-            self.camera.stop()
-            self.camera.close()
-            self.motor.close()
+            if self.camera is not None and self.owns_camera:
+                self.camera.stop()
+                self.camera.close()
+            if self.motor is not None and self.owns_motor:
+                self.motor.close()
             if self.show_window:
                 cv2.destroyAllWindows()
 
@@ -337,6 +344,70 @@ class AutoRaceLaneDrive:
         right = int(clamp(right, -self.args.max_speed, self.args.max_speed))
         return left, right, cte, steer, int(base), center_target, is_turn
 
+    def process_frame(self, frame_bgr: np.ndarray):
+        frame_bgr = cv2.resize(frame_bgr, (self.width, self.height))
+        binary = self.make_binary(frame_bgr)
+        roi = self.apply_roi(binary)
+        warped = self.warp(roi)
+        if np.count_nonzero(warped) < self.args.min_warp_pixels:
+            warped = roi.copy()
+
+        dbg_warp, x_location, target_x, left_ok, right_ok = self.slide_window(warped)
+        center_target = (self.width / 2.0) + self.args.center_bias
+
+        result = {
+            "frame_bgr": frame_bgr,
+            "debug_warp": dbg_warp,
+            "x_location": x_location,
+            "target_x": target_x,
+            "left_ok": left_ok,
+            "right_ok": right_ok,
+            "center_target": center_target,
+            "lane_detected": left_ok or right_ok,
+            "stop_required": False,
+            "cmd_left": None,
+            "cmd_right": None,
+            "msg": "",
+        }
+
+        if not left_ok and not right_ok:
+            self.lost_count += 1
+            result["stop_required"] = self.lost_count >= self.args.lost_stop_frames
+            if result["stop_required"]:
+                self.pid.reset()
+            result["msg"] = f"lane_lost={self.lost_count}"
+            return result
+
+        self.lost_count = 0
+        left, right, cte, steer, base, center_target, is_turn = self.compute_wheel_speed(target_x)
+        cmd_left, cmd_right = left, right
+        if self.args.swap_left_right:
+            cmd_left, cmd_right = cmd_right, cmd_left
+
+        result.update(
+            {
+                "cmd_left": cmd_left,
+                "cmd_right": cmd_right,
+                "cte": cte,
+                "steer": steer,
+                "base": base,
+                "center_target": center_target,
+                "is_turn": is_turn,
+                "msg": (
+                    f"x={x_location} tx={target_x} ctr={center_target:.1f} "
+                    f"cte={cte:.1f} steer={steer:.1f} base={base} "
+                    f"mode={'TURN' if is_turn else 'STRAIGHT'} "
+                    f"L={left} R={right} cmdL={cmd_left} cmdR={cmd_right}"
+                ),
+            }
+        )
+        return result
+
+    def apply_drive_command(self, cmd_left: int, cmd_right: int):
+        if self.motor is None:
+            return
+        self.motor.set_motor_model(-cmd_left, -cmd_left, -cmd_right, -cmd_right)
+
     def drive(self):
         print("Auto-Race style lane drive started.")
         if self.show_window:
@@ -348,42 +419,27 @@ class AutoRaceLaneDrive:
         try:
             while True:
                 t0 = time.time()
+                if self.camera is None:
+                    raise RuntimeError("drive() requires init_camera=True")
                 frame_raw = self.camera.capture_array()
                 if self.args.frame_order == "rgb":
                     frame_bgr = cv2.cvtColor(frame_raw, cv2.COLOR_RGB2BGR)
                 else:
                     frame_bgr = frame_raw.copy()
+                result = self.process_frame(frame_bgr)
+                msg = result["msg"]
+                x_location = result["x_location"]
+                target_x = result["target_x"]
+                center_target = result["center_target"]
+                dbg_warp = result["debug_warp"]
 
-                frame_bgr = cv2.resize(frame_bgr, (self.width, self.height))
-                binary = self.make_binary(frame_bgr)
-                roi = self.apply_roi(binary)
-                warped = self.warp(roi)
-                if np.count_nonzero(warped) < self.args.min_warp_pixels:
-                    warped = roi.copy()
-                dbg_warp, x_location, target_x, left_ok, right_ok = self.slide_window(warped)
-
-                center_target = (self.width / 2.0) + self.args.center_bias
-                if not left_ok and not right_ok:
-                    self.lost_count += 1
-                    if self.lost_count >= self.args.lost_stop_frames:
-                        self.stop()
-                    msg = f"lane_lost={self.lost_count}"
-                else:
-                    self.lost_count = 0
-                    left, right, cte, steer, base, center_target, is_turn = self.compute_wheel_speed(target_x)
-                    # Match your board direction convention.
-                    cmd_left, cmd_right = left, right
-                    if self.args.swap_left_right:
-                        cmd_left, cmd_right = cmd_right, cmd_left
-                    self.motor.set_motor_model(-cmd_left, -cmd_left, -cmd_right, -cmd_right)
-                    msg = (
-                        f"x={x_location} tx={target_x} ctr={center_target:.1f} "
-                        f"cte={cte:.1f} steer={steer:.1f} base={base} mode={'TURN' if is_turn else 'STRAIGHT'} "
-                        f"L={left} R={right} cmdL={cmd_left} cmdR={cmd_right}"
-                    )
+                if result["stop_required"]:
+                    self.stop()
+                elif result["lane_detected"]:
+                    self.apply_drive_command(result["cmd_left"], result["cmd_right"])
 
                 if self.show_window:
-                    vis = frame_bgr.copy()
+                    vis = result["frame_bgr"].copy()
                     y = int(self.height * 0.8)
                     cv2.line(vis, (self.width // 2, int(self.height * self.args.roi_top_ratio)),
                              (self.width // 2, self.height), (255, 0, 0), 2)
