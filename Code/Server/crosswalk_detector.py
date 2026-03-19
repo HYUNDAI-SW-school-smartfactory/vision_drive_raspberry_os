@@ -10,8 +10,8 @@ class CrosswalkDetector:
         self.stop_duration = stop_duration
 
         # Start with a broad green HSV range and tune from runtime logs.
-        self.lower_green = np.array([25, 40, 80], dtype=np.uint8)
-        self.upper_green = np.array([95, 255, 255], dtype=np.uint8)
+        self.lower_green = np.array([108, 147, 110], dtype=np.uint8)
+        self.upper_green = np.array([137, 255, 182], dtype=np.uint8)
 
         self.frame_size = (640, 480)
         self._perspective_matrix = self._build_perspective_matrix(*self.frame_size)
